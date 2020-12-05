@@ -1,3 +1,3 @@
 module github.com/ayushbhargav/go-c8
 
-go 1.15
+go 1.2
