@@ -1,24 +1,52 @@
 package main
 
 import (
+	"io/ioutil"
 	"math/rand"
+	"os"
 	"time"
+
+	"github.com/faiface/pixel"
+	"github.com/faiface/pixel/imdraw"
+	"github.com/faiface/pixel/pixelgl"
+	"golang.org/x/image/colornames"
 )
 
 const (
-	memory         = 4096
-	programLoc     = 0x200
-	regCount       = 0xF + 1
-	timerFrequence = 60 //Hz
-	stackSize      = 16
-	displayRow     = 32
-	displayCol     = 64
-	nibble         = 4
-	byt            = 8
-	bytNib         = 12
-	carry          = 0xF
-	fontNum        = 0xF
+	memory           = 4096
+	programLoc       = 0x200
+	regCount         = 0xF + 1
+	timerFrequence   = 60 //Hz
+	stackSize        = 16
+	displayRow       = 32
+	displayCol       = 64
+	nibble           = 4
+	byt              = 8
+	bytNib           = 12
+	carry            = 0xF
+	fontNum          = 0xF + 1
+	fontHeight       = 5
+	displayPixelSize = 10.0 //px
 )
+
+var chip8Fontset = []uint8{
+	0xF0, 0x90, 0x90, 0x90, 0xF0, // 0
+	0x20, 0x60, 0x20, 0x20, 0x70, // 1
+	0xF0, 0x10, 0xF0, 0x80, 0xF0, // 2
+	0xF0, 0x10, 0xF0, 0x10, 0xF0, // 3
+	0x90, 0x90, 0xF0, 0x10, 0x10, // 4
+	0xF0, 0x80, 0xF0, 0x10, 0xF0, // 5
+	0xF0, 0x80, 0xF0, 0x90, 0xF0, // 6
+	0xF0, 0x10, 0x20, 0x40, 0x40, // 7
+	0xF0, 0x90, 0xF0, 0x90, 0xF0, // 8
+	0xF0, 0x90, 0xF0, 0x10, 0xF0, // 9
+	0xF0, 0x90, 0xF0, 0x90, 0x90, // A
+	0xE0, 0x90, 0xE0, 0x90, 0xE0, // B
+	0xF0, 0x80, 0x80, 0x80, 0xF0, // C
+	0xE0, 0x90, 0x90, 0x90, 0xE0, // D
+	0xF0, 0x80, 0xF0, 0x80, 0xF0, // E
+	0xF0, 0x80, 0xF0, 0x80, 0x80, // F
+}
 
 type chip8 struct {
 	memory     [memory]byte
@@ -28,14 +56,38 @@ type chip8 struct {
 	delayTimer uint8
 	soundTimer uint8
 	pc         uint16
-	sp         uint8
+	sp         int8
 	stack      [stackSize]uint16
 	display    [displayRow][displayCol]uint8
 	keyboard   [regCount]bool
+	clockSpeed int // Hz
+	ops        []operation
+	lastTick   int64
 }
 
-type operation interface {
-	do(chip *chip8, opcode uint16)
+type operation func(chip *chip8, opcode uint16)
+
+func (chip *chip8) tick() {
+	now := time.Now().UnixNano()
+	diff := float64(now-chip.lastTick) / 1000000000.0
+	if diff >= float64(1)/float64(chip.clockSpeed) {
+		chip.lastTick = now
+		chip.emulate()
+	}
+}
+
+func (chip *chip8) emulate() {
+	if chip.delayTimer > 0 {
+		chip.delayTimer--
+	}
+	if chip.soundTimer > 0 {
+		chip.soundTimer--
+		// TODO: Play chip sound here.
+	}
+	for _, op := range chip.ops {
+		op(chip, (uint16(chip.memory[chip.pc])<<8)+uint16(chip.memory[chip.pc+1]))
+	}
+	chip.pc += 2
 }
 
 func getNibble(opcode uint16, place uint8) uint8 {
@@ -350,5 +402,107 @@ func loadRegistersFromMemoryVx(chip *chip8, opcode uint16) {
 	}
 }
 
+func programLoop() {
+	chip := initializeEmulator()
+	win := setupGraphicsWindow()
+
+	for !win.Closed() {
+		win.Clear(colornames.Black)
+		parseKeyboardInput(chip, win)
+		renderDisplay(chip, win)
+		chip.tick()
+		win.Update()
+	}
+}
+
+func initializeEmulator() *chip8 {
+	chip := &chip8{
+		memory:     *new([memory]byte),
+		display:    *new([displayRow][displayCol]uint8),
+		keyboard:   *new([regCount]bool),
+		stack:      *new([stackSize]uint16),
+		reg:        *new([regCount]uint8),
+		sp:         -1,
+		clockSpeed: 500,
+		ops: []operation{
+			cls, jpAddr, callAddr, skipInst, skipNotInst,
+			skipInstVxVy, loadVxVy, orVxVy, andVxVy, xorVxVy,
+			addVxVy, subVxVy, shrVx, subNotVxVy, shiftLeftVx,
+			skipIfSameVxVy, setI, jumpI, randomVx, drawVxVy,
+			skipIfPressedVx, skipIfNotPressedVx, setDelayTimerToVx,
+			setInputToVx, setDelayTimerVx, setSoundTimerVx, setInstrPointerFontLocationVx,
+			setInstrPointerBCDVx, setRegistersInMemoryVx, loadRegistersFromMemoryVx,
+		},
+	}
+
+	for i := 0; i < fontNum*fontHeight; i++ {
+		chip.memory[i] = chip8Fontset[i]
+		if i%5 == 0 {
+			chip.fontMemory[i/5] = uint16(i)
+		}
+	}
+
+	rom := os.Args[1]
+	programBuffer, e := ioutil.ReadFile(rom)
+	if e != nil {
+		panic(e)
+	}
+	for i, byt := range programBuffer {
+		chip.memory[programLoc+i] = byt
+	}
+
+	return chip
+}
+
+func setupGraphicsWindow() *pixelgl.Window {
+	cfg := pixelgl.WindowConfig{
+		Title:  "Go-C8",
+		Bounds: pixel.R(0, 0, displayCol, displayRow),
+		VSync:  true,
+	}
+	win, err := pixelgl.NewWindow(cfg)
+	if err != nil {
+		panic(err)
+	}
+
+	return win
+}
+
+func parseKeyboardInput(chip *chip8, win *pixelgl.Window) {
+	chip.keyboard[0x1] = win.Pressed(pixelgl.Key1)
+	chip.keyboard[0x2] = win.Pressed(pixelgl.Key2)
+	chip.keyboard[0x3] = win.Pressed(pixelgl.Key3)
+	chip.keyboard[0xC] = win.Pressed(pixelgl.Key4)
+	chip.keyboard[0x4] = win.Pressed(pixelgl.KeyQ)
+	chip.keyboard[0x5] = win.Pressed(pixelgl.KeyW)
+	chip.keyboard[0x6] = win.Pressed(pixelgl.KeyE)
+	chip.keyboard[0xD] = win.Pressed(pixelgl.KeyR)
+	chip.keyboard[0x7] = win.Pressed(pixelgl.KeyA)
+	chip.keyboard[0x8] = win.Pressed(pixelgl.KeyS)
+	chip.keyboard[0x9] = win.Pressed(pixelgl.KeyD)
+	chip.keyboard[0xE] = win.Pressed(pixelgl.KeyF)
+	chip.keyboard[0xA] = win.Pressed(pixelgl.KeyZ)
+	chip.keyboard[0x0] = win.Pressed(pixelgl.KeyX)
+	chip.keyboard[0xB] = win.Pressed(pixelgl.KeyC)
+	chip.keyboard[0xF] = win.Pressed(pixelgl.KeyV)
+}
+
+func renderDisplay(chip *chip8, win *pixelgl.Window) {
+	imd := imdraw.New(nil)
+	imd.Color = colornames.Green
+	for i := 0; i < displayRow; i++ {
+		for j := 0; j < displayCol; j++ {
+			if chip.display[i][j] == 1 {
+				v1 := pixel.V(displayPixelSize*float64(j), displayPixelSize*float64(i))
+				v2 := pixel.V(displayPixelSize*float64(j+1), displayPixelSize*float64(i+1))
+				imd.Push(v1, v2)
+				imd.Rectangle(0)
+			}
+		}
+	}
+	imd.Draw(win)
+}
+
 func main() {
+	pixelgl.Run(programLoop)
 }
