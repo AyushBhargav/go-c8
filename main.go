@@ -1,6 +1,7 @@
 package main
 
 import (
+	"fmt"
 	"io/ioutil"
 	"math/rand"
 	"os"
@@ -116,7 +117,7 @@ func getLastByte(opcode uint16) uint8 {
 func cls(chip *chip8, opcode uint16) {
 	if opcode == 0x00E0 {
 		for i := 0; i < displayRow; i++ {
-			for j := 0; i < displayCol; j++ {
+			for j := 0; j < displayCol; j++ {
 				chip.display[i][j] = 0
 			}
 		}
@@ -150,7 +151,7 @@ func skipInst(chip *chip8, opcode uint16) {
 
 func skipNotInst(chip *chip8, opcode uint16) {
 	if getNibble(opcode, 1) == 0x4 {
-		if chip.reg[getLastByte(opcode)] != getNibble(opcode, 2) {
+		if chip.reg[getNibble(opcode, 2)] != getLastByte(opcode) {
 			chip.pc += 2
 		}
 	}
@@ -291,10 +292,10 @@ func drawVxVy(chip *chip8, opcode uint16) {
 		pixelErased := false
 		for i := uint8(0); i < n; i++ {
 			b := chip.memory[chip.instPtr+uint16(i)]
-			for j := uint8(7); j >= 0; j-- {
+			for j := uint8(0); j < 8; j++ {
 				x := (vx + j) % displayCol
 				y := (vy + i) % displayRow
-				bit := b & (0x1 << j)
+				bit := b >> (7 - j) & 0x1
 				oldPixel := chip.display[y][x]
 				chip.display[y][x] = chip.display[y][x] ^ bit
 				pixelErased = pixelErased || (oldPixel == 1 && chip.display[y][x] == 0)
@@ -456,8 +457,8 @@ func initializeEmulator() *chip8 {
 
 func setupGraphicsWindow() *pixelgl.Window {
 	cfg := pixelgl.WindowConfig{
-		Title:  "Go-C8",
-		Bounds: pixel.R(0, 0, displayCol, displayRow),
+		Title:  fmt.Sprintf("Go-C8(%s)", os.Args[1]),
+		Bounds: pixel.R(0, 0, (displayCol+1)*displayPixelSize, (displayRow+1)*displayPixelSize),
 		VSync:  true,
 	}
 	win, err := pixelgl.NewWindow(cfg)
